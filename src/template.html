@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' blob:; worker-src blob:; style-src 'unsafe-inline'; img-src blob: data:; font-src data: blob:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF 黒塗りツール</title>
+<!--
+  pdf-blackout.html : PDF 黒塗りツール（単体HTML・オフライン動作・外部通信なし）
+
+  同梱ライブラリ: PDF.js 3.11.174 (pdfjs-dist)
+    Copyright Mozilla Foundation. Licensed under the Apache License, Version 2.0.
+    License text: see vendor/LICENSE-pdfjs in the source repository,
+    or http://www.apache.org/licenses/LICENSE-2.0
+    以下の <script> に PDF.js 本体とワーカーをそのまま埋め込んでいます。
+-->
+<style>/*__CSS__*/</style>
+</head>
+<body>
+
+<header class="app-header">
+  <h1>PDF 黒塗りツール</h1>
+  <p class="note">処理はすべてこのブラウザの中で行われます。PDF は外部に送信されません。</p>
+</header>
+
+<main class="wrap">
+
+  <!-- 1. 読み込み -->
+  <section class="card" id="secLoad">
+    <h2>1. PDF を読み込む</h2>
+    <div id="dropZone" class="drop">
+      <p>ここに PDF をドラッグ＆ドロップ（複数可・追加で読み込めます）</p>
+      <div class="row">
+        <button type="button" id="btnPick" class="btn primary">ファイルを選択…</button>
+        <button type="button" id="btnClear" class="btn">すべてクリア</button>
+      </div>
+      <input type="file" id="fileInput" accept="application/pdf,.pdf" multiple hidden>
+    </div>
+    <div id="loadStatus" class="status" role="status"></div>
+    <ol id="fileList" class="filelist"></ol>
+    <div class="row">
+      <label title="PDF が N ページずつの組（例：2 ページ組）のくり返しのとき、各組の何ページ目に黒塗りを適用するかを選べます。N=1 なら全ページに適用します。">1組のページ数 N
+        <input type="number" id="inN" min="1" max="20" value="1" class="num"></label>
+      <span title="各組の何ページ目に黒塗りを適用するか">黒塗りを適用する組内の位置：</span>
+      <span id="posBox" class="posbox"></span>
+    </div>
+    <div id="summary" class="summary"></div>
+    <div id="warnList" class="warnbox" hidden></div>
+    <div id="sizeWarn" class="warnbox danger" hidden>
+      <p><strong>用紙サイズが基準と異なるページがあります。</strong></p>
+      <p id="sizeWarnBody"></p>
+      <p class="small">基準と違うページに同じ相対位置のマスクを当てると、隠したい内容を隠せないおそれがあります。続ける場合は、プレビューで該当ページを拡大して必ず確認してください。</p>
+      <button type="button" id="btnSizeAck" class="btn">このまま続ける</button>
+    </div>
+  </section>
+
+  <nav class="tabs" role="tablist">
+    <button type="button" class="tab active" id="tabEdit" data-pane="paneEdit" role="tab">2. マスク編集</button>
+    <button type="button" class="tab" id="tabPreview" data-pane="panePreview" role="tab">3. プレビュー一覧</button>
+    <button type="button" class="tab" id="tabExport" data-pane="paneExport" role="tab">4. 出力</button>
+  </nav>
+
+  <!-- 2. マスク編集 -->
+  <section class="card pane" id="paneEdit">
+    <div class="toolbar">
+      <span class="grp">基準ページ
+        <button type="button" id="btnPrevPage" class="btn sm" title="前のページ">◀</button>
+        <input type="number" id="inPage" min="1" value="1" class="num">
+        <span id="lblPageCount" class="muted"></span>
+        <button type="button" id="btnNextPage" class="btn sm" title="次のページ">▶</button>
+      </span>
+      <span class="grp">ズーム
+        <button type="button" id="btnZoomOut" class="btn sm">−</button>
+        <span id="lblZoom" class="zoomlbl">100%</span>
+        <button type="button" id="btnZoomIn" class="btn sm">＋</button>
+        <button type="button" id="btnFit" class="btn sm">幅に合わせる</button>
+      </span>
+      <label class="grp"><input type="checkbox" id="chkBlack"> 黒塗りプレビュー</label>
+      <label class="grp" title="置いた四角より、各辺をこの長さだけ外側まで黒く塗ります（スキャンのわずかなずれへの余裕）">黒塗り拡大
+        <input type="number" id="inGrow" min="0" max="30" step="0.5" value="1" class="num"> mm</label>
+      <span class="grp">
+        <button type="button" id="btnUndo" class="btn sm">元に戻す</button>
+        <button type="button" id="btnRedo" class="btn sm">やり直し</button>
+      </span>
+      <span class="grp">
+        <button type="button" id="btnSaveMask" class="btn sm">マスク定義を保存</button>
+        <button type="button" id="btnLoadMask" class="btn sm">読み込み…</button>
+        <input type="file" id="fileMask" accept="application/json,.json" hidden>
+      </span>
+    </div>
+    <p id="lblBase" class="muted small"></p>
+    <div id="maskWarn" class="warnbox" hidden></div>
+    <div class="editlayout">
+      <div id="editScroller" class="scroller">
+        <div id="emptyEdit" class="empty">PDF を読み込むと、ここに基準ページが表示されます。</div>
+        <div id="pageBox" class="pagebox" hidden>
+          <canvas id="editCanvas"></canvas>
+          <div id="overlay" class="overlay">
+            <div id="layerEx" class="layer"></div>
+            <div id="layerRect" class="layer"></div>
+            <div id="layerDraw" class="layer"></div>
+          </div>
+        </div>
+      </div>
+      <aside class="side">
+        <h3>矩形の一覧</h3>
+        <p class="muted small">空白部分をドラッグして矩形を作成します。選択して Delete で削除、矢印キーで微調整（Shift で大きく）。Ctrl+ホイールでズーム。</p>
+        <table class="rects">
+          <thead><tr><th>#</th><th>x</th><th>y</th><th>幅</th><th>高さ</th><th></th></tr></thead>
+          <tbody id="rectBody"></tbody>
+        </table>
+        <p class="muted small">単位は mm（基準ページの実寸）。出力時は、置いた四角の各辺を「黒塗り拡大」の mm だけ外側へ広げて黒く塗ります。</p>
+      </aside>
+    </div>
+  </section>
+
+  <!-- 3. プレビュー -->
+  <section class="card pane" id="panePreview" hidden>
+    <div class="toolbar">
+      <label class="grp">表示
+        <select id="selPreviewMode">
+          <option value="full">ページ全体</option>
+          <option value="crop">矩形の周辺（拡大）</option>
+        </select></label>
+      <span class="muted small">サムネイルは目視確認用です。クリックで拡大すると、出力と同じ処理（同じ解像度・検証つき）の結果を表示し、そのページは「確認済み」になります。</span>
+    </div>
+    <div id="thumbGrid" class="thumbgrid"></div>
+  </section>
+
+  <!-- 4. 出力 -->
+  <section class="card pane" id="paneExport" hidden>
+    <h2>出力</h2>
+    <div class="formgrid">
+      <label>解像度 <input type="number" id="inDpi" min="72" max="300" value="300" class="num"> DPI</label>
+      <label>JPEG 品質
+        <input type="number" id="inQuality" min="0.1" max="1" step="0.01" value="0.92" class="num"></label>
+      <label>ファイル名の接頭辞 <input type="text" id="inPrefix" value="page_" class="txt"></label>
+      <label><input type="checkbox" id="chkCsv" checked> 対応表 CSV も作る</label>
+    </div>
+    <p class="muted small">出力は JPEG のみです。既定値（300 DPI・品質 0.92）は、細かい文字も読み取れることを重視した値で、A4 で 1 枚あたり 1MB 前後に収まります。
+      元の PDF に含まれる画像の解像度より高くしても鮮明にはならず、ファイルが大きくなるだけです。</p>
+    <div id="exportBlock" class="warnbox danger" hidden></div>
+    <div id="exportNotes" class="warnbox" hidden></div>
+    <div class="row">
+      <button type="button" id="btnExport" class="btn primary">マスクして一括出力</button>
+    </div>
+    <div id="exportError" class="warnbox danger" hidden></div>
+    <div id="exportResult" class="result" hidden>
+      <h3>出力が完了しました</h3>
+      <dl class="stats">
+        <dt>処理枚数</dt><dd id="resTotal"></dd>
+        <dt>マスク適用枚数</dt><dd id="resMasked"></dd>
+        <dt>検証エラー</dt><dd id="resErrors"></dd>
+      </dl>
+      <div class="row">
+        <button type="button" id="dlZip" class="btn primary">画像ZIPをダウンロード</button>
+        <button type="button" id="dlCsv" class="btn">対応表CSVをダウンロード</button>
+      </div>
+      <p id="resNote" class="small muted"></p>
+    </div>
+  </section>
+
+  <p id="workerMode" class="muted small footer"></p>
+</main>
+
+<!-- 汎用ダイアログ -->
+<dialog id="dlgConfirm" class="dlg">
+  <h3 id="cfTitle"></h3>
+  <ul id="cfBody"></ul>
+  <div class="row end">
+    <button type="button" id="cfCancel" class="btn">キャンセル</button>
+    <button type="button" id="cfOk" class="btn primary">続ける</button>
+  </div>
+</dialog>
+
+<dialog id="dlgProgress" class="dlg">
+  <h3>出力中…</h3>
+  <progress id="progBar" max="100" value="0"></progress>
+  <p id="progText"></p>
+  <div class="row end"><button type="button" id="btnCancelExport" class="btn">キャンセル</button></div>
+</dialog>
+
+<!-- ページ拡大・個別補正 -->
+<dialog id="dlgPage" class="dlg big">
+  <div class="pd-head">
+    <strong id="pdTitle"></strong>
+    <span id="pdStatus" class="muted small"></span>
+    <span class="spacer"></span>
+    <button type="button" id="pdPrev" class="btn sm">◀ 前のページ</button>
+    <button type="button" id="pdNext" class="btn sm">次のページ ▶</button>
+    <button type="button" id="pdClose" class="btn sm">閉じる</button>
+  </div>
+  <div class="pd-body">
+    <div class="pd-view" id="pdView">
+      <div class="pd-wrap" id="pdWrap">
+        <div id="pdCanvasHost"></div>
+        <div id="pdOverlay" class="pd-overlay"></div>
+      </div>
+    </div>
+    <aside class="pd-side">
+      <h3>このページだけの補正</h3>
+      <p id="pdInfo" class="muted small"></p>
+      <div class="formgrid">
+        <label>平行移動 dx <input type="number" id="pdDx" step="0.5" value="0" class="num"> mm</label>
+        <label>dy <input type="number" id="pdDy" step="0.5" value="0" class="num"> mm</label>
+      </div>
+      <p class="muted small">dx・dy は共通の矩形すべてに加わります（右・下が正）。</p>
+      <div id="pdRects"></div>
+      <div class="row">
+        <button type="button" id="pdAdd" class="btn sm">このページだけ矩形を追加（ドラッグ）</button>
+        <button type="button" id="pdReset" class="btn sm">このページの補正をリセット</button>
+      </div>
+      <p class="muted small">追加した矩形は平行移動の影響を受けません。</p>
+    </aside>
+  </div>
+</dialog>
+
+<script id="pdfjs-lib">/*__PDFJS__*/</script>
+<script type="text/plain" id="pdfjs-worker-src">/*__PDFJS_WORKER__*/</script>
+<script id="app-main">/*__APP__*/</script>
+</body>
+</html>
